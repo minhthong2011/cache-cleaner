@@ -27,6 +27,10 @@ android {
         coreLibraryDesugaringEnabled true
     }
 
+    buildFeatures {
+        aidl true
+    }
+
     kotlinOptions {
         jvmTarget = '1.8'
     }

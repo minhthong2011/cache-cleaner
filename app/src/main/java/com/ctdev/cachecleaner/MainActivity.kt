@@ -1,9 +1,12 @@
 package com.ctdev.cachecleaner
 
+import android.content.ComponentName
 import android.content.Intent
+import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
+import android.os.IBinder
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
@@ -15,16 +18,16 @@ class MainActivity : AppCompatActivity() {
     private lateinit var statusText: TextView
     private lateinit var clearButton: Button
     private lateinit var openShizukuButton: Button
+    private lateinit var userServiceArgs: Shizuku.UserServiceArgs
+
+    private var cacheService: ICacheCleanerService? = null
 
     companion object {
         private const val REQUEST_CODE = 1001
-
-        // Shizuku (app quản lý) trên Play Store / GitHub
         private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
         private const val SHIZUKU_DOWNLOAD_URL = "https://shizuku.rikka.app/download/"
     }
 
-    // Được gọi khi người dùng chấp nhận / từ chối popup xin quyền Shizuku
     private val permissionListener =
         Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
             if (requestCode == REQUEST_CODE) {
@@ -38,16 +41,33 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-    // Được gọi khi app kết nối được với service Shizuku
     private val binderReceivedListener = Shizuku.OnBinderReceivedListener {
         runOnUiThread { checkPermissionAndUpdateUi() }
     }
 
-    // Được gọi khi Shizuku bị tắt / mất kết nối
     private val binderDeadListener = Shizuku.OnBinderDeadListener {
         runOnUiThread {
             updateStatus("Shizuku đã ngừng chạy.\nHãy mở app Shizuku và bấm Start lại.")
             clearButton.isEnabled = false
+        }
+    }
+
+    // Kết nối tới CacheCleanerService chạy dưới quyền shell/root do Shizuku cấp
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+            if (binder != null && binder.pingBinder()) {
+                cacheService = ICacheCleanerService.Stub.asInterface(binder)
+                runClearCache()
+            } else {
+                runOnUiThread {
+                    clearButton.isEnabled = true
+                    updateStatus("❌ Không kết nối được service dọn cache.")
+                }
+            }
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            cacheService = null
         }
     }
 
@@ -58,6 +78,14 @@ class MainActivity : AppCompatActivity() {
         statusText = findViewById(R.id.statusText)
         clearButton = findViewById(R.id.clearButton)
         openShizukuButton = findViewById(R.id.openShizukuButton)
+
+        userServiceArgs = Shizuku.UserServiceArgs(
+            ComponentName(packageName, CacheCleanerService::class.java.name)
+        )
+            .daemon(false)
+            .processNameSuffix("cache_service")
+            .debuggable(false)
+            .version(1)
 
         clearButton.isEnabled = false
         clearButton.setOnClickListener { clearAllCache() }
@@ -78,9 +106,15 @@ class MainActivity : AppCompatActivity() {
         Shizuku.removeRequestPermissionResultListener(permissionListener)
         Shizuku.removeBinderReceivedListener(binderReceivedListener)
         Shizuku.removeBinderDeadListener(binderDeadListener)
+        if (::userServiceArgs.isInitialized) {
+            try {
+                Shizuku.unbindUserService(userServiceArgs, serviceConnection, true)
+            } catch (_: Exception) {
+                // Shizuku có thể đã ngừng chạy, bỏ qua
+            }
+        }
     }
 
-    /** Kiểm tra trạng thái Shizuku + quyền, cập nhật giao diện tương ứng. */
     private fun checkPermissionAndUpdateUi() {
         if (!Shizuku.pingBinder()) {
             updateStatus(
@@ -120,46 +154,40 @@ class MainActivity : AppCompatActivity() {
         statusText.text = text
     }
 
-    /**
-     * Xóa cache của TOÀN BỘ app trên máy bằng lệnh hệ thống `pm trim-caches`,
-     * chạy với quyền shell (ADB) do Shizuku cấp — không cần root.
-     *
-     * `pm trim-caches <bytes>` dọn cache mọi app cho tới khi giải phóng đủ
-     * dung lượng chỉ định. Truyền một số cực lớn để chắc chắn xóa hết toàn bộ.
-     */
+    /** Bước 1: khởi động/kết nối tới service chạy với quyền shell/root. */
     private fun clearAllCache() {
         clearButton.isEnabled = false
+        updateStatus("Đang khởi tạo service quyền cao...")
+        try {
+            Shizuku.bindUserService(userServiceArgs, serviceConnection)
+        } catch (e: Exception) {
+            clearButton.isEnabled = true
+            updateStatus("❌ Lỗi khi khởi tạo service: ${e.message}")
+        }
+    }
+
+    /** Bước 2: service đã kết nối, gọi lệnh dọn cache trên luồng nền. */
+    private fun runClearCache() {
         updateStatus("Đang xóa cache toàn bộ app, vui lòng đợi...")
-
         Thread {
-            try {
-                val process = Shizuku.newProcess(
-                    arrayOf("sh", "-c", "pm trim-caches 999999999999"),
-                    null,
-                    null
-                )
-                val exitCode = process.waitFor()
-                val errorOutput = process.errorStream.bufferedReader().readText().trim()
-
-                runOnUiThread {
-                    clearButton.isEnabled = true
-                    if (exitCode == 0) {
-                        updateStatus("✅ Đã xóa xong cache của toàn bộ ứng dụng!")
-                        Toast.makeText(this, "Đã xóa cache thành công", Toast.LENGTH_SHORT).show()
-                    } else {
-                        updateStatus("⚠️ Lệnh chạy xong nhưng có cảnh báo (exit $exitCode):\n$errorOutput")
-                    }
-                }
+            val result = try {
+                cacheService?.clearAllCache() ?: "ERROR: service null"
             } catch (e: Exception) {
-                runOnUiThread {
-                    clearButton.isEnabled = true
-                    updateStatus("❌ Lỗi khi xóa cache: ${e.message}")
+                "EXCEPTION: ${e.message}"
+            }
+
+            runOnUiThread {
+                clearButton.isEnabled = true
+                if (result == "OK") {
+                    updateStatus("✅ Đã xóa xong cache của toàn bộ ứng dụng!")
+                    Toast.makeText(this, "Đã xóa cache thành công", Toast.LENGTH_SHORT).show()
+                } else {
+                    updateStatus("⚠️ Có lỗi khi xóa cache:\n$result")
                 }
             }
         }.start()
     }
 
-    /** Mở app Shizuku nếu đã cài, ngược lại mở trang tải Shizuku. */
     private fun openOrInstallShizuku() {
         val launchIntent = packageManager.getLaunchIntentForPackage(SHIZUKU_PACKAGE)
         if (launchIntent != null) {
