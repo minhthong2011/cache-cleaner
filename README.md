@@ -41,7 +41,7 @@ dẹp nổi tiếng như SD Maid SE làm điều này.
 
 ## Giới hạn cần biết
 
-- Không root: phải mở lại Shizuku sau mỗi lần khởi động máy (giới hạn của
+- Không root: phải mở lại Shizuku sau mỗi lần khởi động máy (giới hạn củaa)
   chính Shizuku/Android, không phải của app này).
 - `pm trim-caches` chỉ xóa **cache**, không đụng đến dữ liệu đăng nhập hay
   dữ liệu app (an toàn, giống nút "Xóa bộ nhớ đệm" trong Cài đặt).
